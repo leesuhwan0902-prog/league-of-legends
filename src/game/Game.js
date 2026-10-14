@@ -1,8 +1,8 @@
-// 탑다운 미니 MOBA 게임 엔진 (렌더링 + 시뮬레이션 + AI)
+// 탑다운 미니 MOBA — 시뮬레이션 · AI · 전투 (렌더링은 Scene3D / overlay 담당)
 import {
   WORLD, BASES, COLORS, ABILITIES, ABILITY_ORDER, TOWER_POSITIONS,
   clamp, lanePoint, distToLane, mulberry32,
-  WAVE_INTERVAL, FIRST_WAVE_DELAY, XP_REWARD,
+  WAVE_INTERVAL, FIRST_WAVE_DELAY, XP_REWARD, GOLD, ITEMS_BY_ID, MAX_ITEMS,
 } from './constants.js'
 import { createChampion, createMinion, createStructure } from './factory.js'
 
@@ -33,7 +33,9 @@ export class Game {
     this.playerKills = 0
     this.playerCS = 0
     this.towersDestroyed = 0
-    this.camera = { x: 0, y: 0 }
+    this.gold = GOLD.start
+    this.goldEarned = 0
+    this.lastBuy = null
 
     this.player = createChampion('blue', BASES.blue, true)
     this.enemy = createChampion('red', BASES.red, false)
@@ -58,8 +60,6 @@ export class Game {
       if (distToLane(x, y) < 195) continue
       this.decor.push({ x, y, r: 16 + rnd() * 32, rock: rnd() > 0.62 })
     }
-    this.camera.x = clamp(this.player.x - this.view.w / 2, 0, Math.max(0, WORLD.w - this.view.w))
-    this.camera.y = clamp(this.player.y - this.view.h / 2, 0, Math.max(0, WORLD.h - this.view.h))
   }
 
   // ─────────────────────────── 입력 API ───────────────────────────
@@ -87,12 +87,17 @@ export class Game {
     p.cooldowns[slot] = ab.cd
     p.facing = Math.atan2(wy - p.y, wx - p.x)
 
-    const scale = 1 + (p.level - 1) * 0.075
+    const scale = this.abilityScale(p)
     if (ab.type === 'skillshot') this.spawnSkillshot(p, wx, wy, ab, scale)
     else if (ab.type === 'nova') this.castNova(p, ab, scale)
     else if (ab.type === 'dash') this.castDash(p, wx, wy, ab)
     else if (ab.type === 'ground') this.castGround(p, wx, wy, ab, scale)
     return { ok: true }
+  }
+
+  /** 스킬 피해 배율 = 레벨 계수 × 주문력(ap) 계수 */
+  abilityScale(unit) {
+    return (1 + (unit.level - 1) * 0.075) * (1 + (unit.ap || 0))
   }
 
   // ─────────────────────────── 스킬 구현 ───────────────────────────
@@ -151,6 +156,69 @@ export class Game {
     }
   }
 
+  // ─────────────────────────── 골드 & 상점 ───────────────────────────
+
+  addGold(amount, x, y) {
+    const rounded = Math.round(amount)
+    this.gold += rounded
+    this.goldEarned += rounded
+    this.floaters.push({
+      x: x ?? this.player.x,
+      y: y ?? this.player.y,
+      text: `+${rounded}`,
+      life: 1.1,
+      max: 1.1,
+      color: '#ffd166',
+      size: 14,
+      gold: true,
+    })
+    return rounded
+  }
+
+  /** 아이템 구매 */
+  buyItem(itemId) {
+    const item = ITEMS_BY_ID[itemId]
+    const p = this.player
+    if (!item) return { ok: false, reason: 'unknown' }
+    if (p.items.length >= MAX_ITEMS) return { ok: false, reason: 'full' }
+    if (this.gold < item.cost) return { ok: false, reason: 'gold' }
+    if (!p.alive) return { ok: false, reason: 'dead' }
+
+    this.gold -= item.cost
+    p.items.push(itemId)
+    this.applyItemStats(p, item)
+    this.lastBuy = { id: itemId, at: this.time }
+    this.floaters.push({ x: p.x, y: p.y, text: `${item.icon} ${item.name} 구매`, life: 1.6, max: 1.6, color: '#9be7ff', size: 14 })
+    return { ok: true, item }
+  }
+
+  applyItemStats(unit, item) {
+    const s = item.stats || {}
+    if (s.atk) unit.atk += s.atk
+    if (s.atkSpeed) unit.atkSpeed = Math.min(2.5, unit.atkSpeed + s.atkSpeed)
+    if (s.speed) unit.speed += s.speed
+    if (s.ap) unit.ap = (unit.ap || 0) + s.ap
+    if (s.maxHp) {
+      unit.maxHp += s.maxHp
+      unit.hp = Math.min(unit.maxHp, unit.hp + s.maxHp)
+    }
+    if (s.maxMana) {
+      unit.maxMana += s.maxMana
+      unit.mana = Math.min(unit.maxMana, unit.mana + s.maxMana)
+    }
+  }
+
+  /** 보유 아이템으로 얻은 능력치 합계 (HUD 표시용) */
+  itemTotals() {
+    const t = { atk: 0, atkSpeed: 0, speed: 0, ap: 0, maxHp: 0, maxMana: 0 }
+    for (const id of this.player.items) {
+      const s = ITEMS_BY_ID[id] && ITEMS_BY_ID[id].stats
+      if (!s) continue
+      for (const k of Object.keys(t)) if (s[k]) t[k] += s[k]
+    }
+    return t
+  }
+
   // ─────────────────────────── 전투 ───────────────────────────
 
   dealDamage(target, amount, source) {
@@ -179,25 +247,31 @@ export class Game {
     this.effects.push({ type: 'ring', x: u.x, y: u.y, r0: u.radius, r1: u.radius * 3.6, life: 0.42, max: 0.42, color: c.base })
     for (let i = 0; i < 6; i++) {
       const a = Math.random() * TAU
-      this.effects.push({ type: 'spark', x: u.x, y: u.y, vx: Math.cos(a) * 120, vy: Math.sin(a) * 120, life: 0.4, max: 0.4, color: c.light })
+      this.effects.push({ type: 'spark', x: u.x, y: u.y, z: u.radius, vx: Math.cos(a) * 120, vy: Math.sin(a) * 120, life: 0.4, max: 0.4, color: c.light })
     }
 
+    const byPlayer = source === this.player
     const byBlue = source && source.team === 'blue'
+
     if (u.kind === 'minion') {
-      if (source === this.player) this.playerCS++
+      if (byPlayer) this.playerCS++
       if (byBlue) this.gainXp(XP_REWARD.minion)
+      // ★ 미니언 처치 골드 (플레이어가 막타를 쳤을 때)
+      if (byPlayer) this.addGold(u.ranged ? GOLD.minionRanged : GOLD.minionMelee, u.x, u.y)
     } else if (u.kind === 'tower') {
       if (byBlue) {
         this.towersDestroyed++
         this.gainXp(XP_REWARD.tower)
-        this.announce(u.team === 'red' ? '적 타워 파괴!' : '아군 타워 파괴됨', u.team === 'red' ? '#7dd3fc' : '#ff8a8a')
+        this.addGold(GOLD.tower, u.x, u.y)
+        this.announce(u.team === 'red' ? '적 타워 파괴! +180G' : '아군 타워 파괴됨', u.team === 'red' ? '#7dd3fc' : '#ff8a8a')
       }
     } else if (u.kind === 'champion') {
       if (u.team === 'red') {
         this.champKills.blue++
         this.playerKills++
         this.gainXp(XP_REWARD.champion)
-        this.announce('적 챔피언 처치!', '#ffd166')
+        this.addGold(GOLD.champion, u.x, u.y)
+        this.announce('적 챔피언 처치! +320G', '#ffd166')
       } else {
         this.champKills.red++
         this.announce('챔피언 사망', '#ff8a8a')
@@ -239,6 +313,10 @@ export class Game {
   update(dt) {
     this.time += dt
 
+    // 패시브 골드 수급
+    this.gold += GOLD.perSecond * dt
+    this.goldEarned += GOLD.perSecond * dt
+
     // 웨이브 스폰
     this.waveTimer -= dt
     if (this.waveTimer <= 0) {
@@ -253,7 +331,6 @@ export class Game {
     this.updateProjectiles(dt)
     this.separate()
     this.updateEffects(dt)
-    this.updateCamera()
     this.reap()
 
     if (!this.winner) this.checkWin()
@@ -275,7 +352,6 @@ export class Game {
       if (u.kind === 'champion') {
         u.respawnTimer -= dt
         if (u.respawnTimer <= 0) this.respawn(u)
-        else if (u.lastHitBy && u.hitFlash > 0) u.hitFlash -= dt
       }
       return
     }
@@ -300,7 +376,7 @@ export class Game {
     this.effects.push({ type: 'ring', x: u.x, y: u.y, r0: 12, r1: 120, life: 0.6, max: 0.6, color: '#ffffff' })
   }
 
-  /** 아군 우선순위: 미니언/챔피언 → 구조물 */
+  /** 우선순위: 미니언/챔피언 → 구조물 */
   pickTarget(unit, range) {
     const r2 = range * range
     let bestSoft = null, bdSoft = Infinity
@@ -329,8 +405,10 @@ export class Game {
       type: 'line',
       x1: attacker.x,
       y1: attacker.y,
+      z: attacker.kind === 'champion' ? 34 : attacker.radius,
       x2: target.x,
       y2: target.y,
+      z2: target.radius,
       life: isTower ? 0.16 : 0.12,
       max: isTower ? 0.16 : 0.12,
       color: isTower ? '#ffd98a' : COLORS[attacker.team].light,
@@ -498,19 +576,6 @@ export class Game {
     this.floaters = this.floaters.filter((f) => f.life > 0)
   }
 
-  updateCamera() {
-    const p = this.player
-    const v = this.view
-    const tx = p.x - v.w / 2
-    const ty = p.y - v.h / 2
-    this.camera.x += (tx - this.camera.x) * 0.16
-    this.camera.y += (ty - this.camera.y) * 0.16
-    const maxX = WORLD.w - v.w
-    const maxY = WORLD.h - v.h
-    this.camera.x = maxX <= 0 ? maxX / 2 : clamp(this.camera.x, 0, maxX)
-    this.camera.y = maxY <= 0 ? maxY / 2 : clamp(this.camera.y, 0, maxY)
-  }
-
   reap() {
     this.units = this.units.filter((u) => u.alive || u.kind === 'champion')
   }
@@ -522,373 +587,20 @@ export class Game {
     else if (blueNexus && !blueNexus.alive) this.winner = 'red'
   }
 
-  // ─────────────────────────── 렌더링 ───────────────────────────
-
-  render(ctx, view, dpr) {
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, view.w, view.h)
-    ctx.fillStyle = '#04060c'
-    ctx.fillRect(0, 0, view.w, view.h)
-
-    ctx.save()
-    ctx.translate(-this.camera.x, -this.camera.y)
-    this.drawMap(ctx)
-    this.drawUnits(ctx)
-    this.drawProjectiles(ctx)
-    this.drawEffects(ctx)
-    this.drawFloaters(ctx)
-    ctx.restore()
-
-    this.drawMinimap(ctx, view)
-    this.drawVignette(ctx, view)
-  }
-
-  drawMap(ctx) {
-    ctx.fillStyle = '#0c1a14'
-    ctx.fillRect(0, 0, WORLD.w, WORLD.h)
-
-    // 장식 (수풀/바위)
-    for (const d of this.decor) {
-      if (d.rock) {
-        ctx.fillStyle = '#232f28'
-        ctx.beginPath()
-        ctx.arc(d.x, d.y, d.r, 0, TAU)
-        ctx.fill()
-        ctx.fillStyle = '#2f3d34'
-        ctx.beginPath()
-        ctx.arc(d.x - d.r * 0.15, d.y - d.r * 0.2, d.r * 0.62, 0, TAU)
-        ctx.fill()
-      } else {
-        ctx.fillStyle = '#123a26'
-        ctx.beginPath()
-        ctx.arc(d.x, d.y, d.r, 0, TAU)
-        ctx.fill()
-        ctx.fillStyle = '#0e2c1d'
-        ctx.beginPath()
-        ctx.arc(d.x, d.y, d.r * 0.6, 0, TAU)
-        ctx.fill()
-      }
-    }
-
-    // 레인
-    const a = BASES.blue
-    const b = BASES.red
-    ctx.lineCap = 'round'
-    ctx.strokeStyle = '#31402f'
-    ctx.lineWidth = 250
-    ctx.beginPath()
-    ctx.moveTo(a.x, a.y)
-    ctx.lineTo(b.x, b.y)
-    ctx.stroke()
-    ctx.strokeStyle = '#3f5340'
-    ctx.lineWidth = 190
-    ctx.beginPath()
-    ctx.moveTo(a.x, a.y)
-    ctx.lineTo(b.x, b.y)
-    ctx.stroke()
-
-    // 강
-    const mid = lanePoint(0.5)
-    ctx.save()
-    ctx.translate(mid.x, mid.y)
-    ctx.rotate(Math.atan2(b.y - a.y, b.x - a.x))
-    ctx.fillStyle = 'rgba(46,124,170,0.30)'
-    ctx.fillRect(-95, -1700, 190, 3400)
-    ctx.fillStyle = 'rgba(120,200,240,0.10)'
-    ctx.fillRect(-60, -1700, 40, 3400)
-    ctx.restore()
-
-    // 각 진영 기지 영역
-    for (const team of ['blue', 'red']) {
-      const base = BASES[team]
-      const c = COLORS[team]
-      const grd = ctx.createRadialGradient(base.x, base.y, 20, base.x, base.y, 330)
-      grd.addColorStop(0, `${c.base}44`)
-      grd.addColorStop(1, 'transparent')
-      ctx.fillStyle = grd
-      ctx.beginPath()
-      ctx.arc(base.x, base.y, 330, 0, TAU)
-      ctx.fill()
-    }
-  }
-
-  drawUnits(ctx) {
-    const order = { nexus: 0, tower: 1, minion: 2, champion: 3 }
-    const list = this.units.filter((u) => u.alive).sort((x, y) => order[x.kind] - order[y.kind])
-    for (const u of list) {
-      if (u.kind === 'champion') this.drawChampion(ctx, u)
-      else if (u.kind === 'minion') this.drawMinion(ctx, u)
-      else this.drawStructure(ctx, u)
-    }
-  }
-
-  drawStructure(ctx, u) {
-    const c = COLORS[u.team]
-    const isNexus = u.kind === 'nexus'
-    const r = u.radius
-
-    ctx.save()
-    ctx.shadowColor = c.base
-    ctx.shadowBlur = isNexus ? 34 : 16
-    if (isNexus) {
-      ctx.translate(u.x, u.y)
-      ctx.rotate(Math.PI / 4)
-      ctx.fillStyle = c.dark
-      ctx.fillRect(-r * 0.72, -r * 0.72, r * 1.44, r * 1.44)
-      ctx.fillStyle = c.base
-      ctx.fillRect(-r * 0.42, -r * 0.42, r * 0.84, r * 0.84)
-    } else {
-      ctx.fillStyle = c.dark
-      ctx.beginPath()
-      ctx.arc(u.x, u.y, r, 0, TAU)
-      ctx.fill()
-      ctx.fillStyle = c.base
-      ctx.beginPath()
-      ctx.arc(u.x, u.y, r * 0.62, 0, TAU)
-      ctx.fill()
-    }
-    ctx.restore()
-
-    if (u.hitFlash > 0) {
-      ctx.fillStyle = `rgba(255,255,255,${u.hitFlash * 3})`
-      ctx.beginPath()
-      ctx.arc(u.x, u.y, r, 0, TAU)
-      ctx.fill()
-    }
-
-    this.drawBar(ctx, u.x, u.y - r - 16, r * 2.4, u.hp / u.maxHp, isNexus ? '#ffd166' : c.base)
-  }
-
-  drawMinion(ctx, u) {
-    const c = COLORS[u.team]
-    ctx.fillStyle = c.minion
-    ctx.beginPath()
-    if (u.ranged) {
-      ctx.save()
-      ctx.translate(u.x, u.y)
-      ctx.rotate(Math.PI / 4)
-      ctx.fillRect(-u.radius, -u.radius, u.radius * 2, u.radius * 2)
-      ctx.restore()
-    } else {
-      ctx.arc(u.x, u.y, u.radius, 0, TAU)
-      ctx.fill()
-    }
-    ctx.strokeStyle = 'rgba(0,0,0,0.45)'
-    ctx.lineWidth = 2
-    ctx.beginPath()
-    ctx.arc(u.x, u.y, u.radius, 0, TAU)
-    ctx.stroke()
-    if (u.hitFlash > 0) {
-      ctx.fillStyle = `rgba(255,255,255,${u.hitFlash * 3})`
-      ctx.beginPath()
-      ctx.arc(u.x, u.y, u.radius, 0, TAU)
-      ctx.fill()
-    }
-    if (u.hp < u.maxHp) this.drawBar(ctx, u.x, u.y - u.radius - 9, u.radius * 2.2, u.hp / u.maxHp, c.base, 3)
-  }
-
-  drawChampion(ctx, u) {
-    const c = COLORS[u.team]
-    const r = u.radius
-    // 사거리 표시
-    ctx.strokeStyle = `${c.base}22`
-    ctx.lineWidth = 1.5
-    ctx.beginPath()
-    ctx.arc(u.x, u.y, u.atkRange, 0, TAU)
-    ctx.stroke()
-
-    ctx.save()
-    ctx.shadowColor = c.base
-    ctx.shadowBlur = 22
-    ctx.fillStyle = c.dark
-    ctx.beginPath()
-    ctx.arc(u.x, u.y, r, 0, TAU)
-    ctx.fill()
-    ctx.restore()
-
-    ctx.fillStyle = c.base
-    ctx.beginPath()
-    ctx.arc(u.x, u.y, r * 0.68, 0, TAU)
-    ctx.fill()
-
-    // 바라보는 방향 표시
-    ctx.strokeStyle = c.light
-    ctx.lineWidth = 3
-    ctx.beginPath()
-    ctx.moveTo(u.x, u.y)
-    ctx.lineTo(u.x + Math.cos(u.facing) * (r + 9), u.y + Math.sin(u.facing) * (r + 9))
-    ctx.stroke()
-
-    if (u.hitFlash > 0) {
-      ctx.fillStyle = `rgba(255,255,255,${u.hitFlash * 3})`
-      ctx.beginPath()
-      ctx.arc(u.x, u.y, r, 0, TAU)
-      ctx.fill()
-    }
-
-    // 이름 + 레벨
-    ctx.font = 'bold 12px system-ui, sans-serif'
-    ctx.textAlign = 'center'
-    ctx.fillStyle = u.isPlayer ? '#ffffff' : '#ffd0d0'
-    ctx.fillText(`${u.name} (Lv.${u.level})`, u.x, u.y - r - 26)
-
-    this.drawBar(ctx, u.x, u.y - r - 20, 64, u.hp / u.maxHp, u.isPlayer ? '#39d353' : '#ff5a5a', 7)
-    if (u.maxMana > 0) this.drawBar(ctx, u.x, u.y - r - 12, 64, u.mana / u.maxMana, '#4aa8ff', 5)
-  }
-
-  drawBar(ctx, cx, topY, width, ratio, color, height = 6) {
-    const w = width
-    const h = height
-    const x = cx - w / 2
-    ctx.fillStyle = 'rgba(0,0,0,0.62)'
-    ctx.fillRect(x - 1, topY - 1, w + 2, h + 2)
-    ctx.fillStyle = 'rgba(255,255,255,0.08)'
-    ctx.fillRect(x, topY, w, h)
-    const clamped = clamp(ratio, 0, 1)
-    ctx.fillStyle = color
-    ctx.fillRect(x, topY, w * clamped, h)
-  }
-
-  drawProjectiles(ctx) {
-    for (const pr of this.projectiles) {
-      ctx.save()
-      ctx.shadowColor = pr.color
-      ctx.shadowBlur = 18
-      ctx.fillStyle = pr.color
-      ctx.beginPath()
-      ctx.arc(pr.x, pr.y, pr.radius, 0, TAU)
-      ctx.fill()
-      ctx.restore()
-      const n = Math.hypot(pr.vx, pr.vy) || 1
-      ctx.strokeStyle = `${pr.color}77`
-      ctx.lineWidth = pr.radius * 1.4
-      ctx.lineCap = 'round'
-      ctx.beginPath()
-      ctx.moveTo(pr.x, pr.y)
-      ctx.lineTo(pr.x - (pr.vx / n) * 34, pr.y - (pr.vy / n) * 34)
-      ctx.stroke()
-    }
-  }
-
-  drawEffects(ctx) {
-    for (const e of this.effects) {
-      const k = clamp(e.life / e.max, 0, 1)
-      if (e.type === 'ring') {
-        const r = e.r0 + (e.r1 - e.r0) * (1 - k)
-        ctx.save()
-        ctx.globalAlpha = k * 0.85
-        if (e.fill) {
-          ctx.fillStyle = `${e.color}33`
-          ctx.beginPath()
-          ctx.arc(e.x, e.y, r, 0, TAU)
-          ctx.fill()
-        }
-        ctx.strokeStyle = e.color
-        ctx.lineWidth = 3
-        ctx.beginPath()
-        ctx.arc(e.x, e.y, r, 0, TAU)
-        ctx.stroke()
-        ctx.restore()
-      } else if (e.type === 'line') {
-        ctx.save()
-        ctx.globalAlpha = k
-        ctx.strokeStyle = e.color
-        ctx.lineWidth = e.width || 2
-        ctx.lineCap = 'round'
-        ctx.beginPath()
-        ctx.moveTo(e.x1, e.y1)
-        ctx.lineTo(e.x2, e.y2)
-        ctx.stroke()
-        ctx.restore()
-      } else if (e.type === 'spark') {
-        ctx.save()
-        ctx.globalAlpha = k
-        ctx.fillStyle = e.color
-        ctx.beginPath()
-        ctx.arc(e.x, e.y, 3, 0, TAU)
-        ctx.fill()
-        ctx.restore()
-      }
-    }
-  }
-
-  drawFloaters(ctx) {
-    ctx.textAlign = 'center'
-    for (const f of this.floaters) {
-      const k = clamp(f.life / f.max, 0, 1)
-      ctx.save()
-      ctx.globalAlpha = f.fixed ? Math.min(1, k * 2) : k
-      ctx.font = `bold ${f.size || 13}px system-ui, sans-serif`
-      ctx.lineWidth = 3
-      ctx.strokeStyle = 'rgba(0,0,0,0.75)'
-      ctx.strokeText(f.text, f.x, f.y)
-      ctx.fillStyle = f.color
-      ctx.fillText(f.text, f.x, f.y)
-      ctx.restore()
-    }
-  }
-
-  drawMinimap(ctx, view) {
-    const size = Math.min(180, Math.max(120, Math.round(view.h * 0.28)))
-    const pad = 16
-    const x0 = view.w - size - pad
-    const y0 = view.h - size - pad
-    ctx.save()
-    ctx.globalAlpha = 0.94
-    ctx.fillStyle = 'rgba(4,8,14,0.86)'
-    ctx.fillRect(x0, y0, size, size)
-    ctx.strokeStyle = 'rgba(255,255,255,0.22)'
-    ctx.lineWidth = 1
-    ctx.strokeRect(x0 + 0.5, y0 + 0.5, size - 1, size - 1)
-
-    const sx = size / WORLD.w
-    const sy = size / WORLD.h
-    ctx.strokeStyle = 'rgba(150,180,155,0.55)'
-    ctx.lineWidth = 6
-    ctx.lineCap = 'round'
-    ctx.beginPath()
-    ctx.moveTo(x0 + BASES.blue.x * sx, y0 + BASES.blue.y * sy)
-    ctx.lineTo(x0 + BASES.red.x * sx, y0 + BASES.red.y * sy)
-    ctx.stroke()
-
-    for (const u of this.units) {
-      if (!u.alive) continue
-      const r = u.kind === 'champion' ? 3.8 : u.kind === 'nexus' ? 4.5 : u.kind === 'tower' ? 2.8 : 1.9
-      ctx.fillStyle = COLORS[u.team].base
-      ctx.beginPath()
-      ctx.arc(x0 + u.x * sx, y0 + u.y * sy, r, 0, TAU)
-      ctx.fill()
-    }
-    ctx.strokeStyle = '#ffffff'
-    ctx.lineWidth = 1.6
-    ctx.beginPath()
-    ctx.arc(x0 + this.player.x * sx, y0 + this.player.y * sy, 5.5, 0, TAU)
-    ctx.stroke()
-
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)'
-    ctx.lineWidth = 1
-    ctx.strokeRect(x0 + this.camera.x * sx, y0 + this.camera.y * sy, view.w * sx, view.h * sy)
-    ctx.restore()
-  }
-
-  drawVignette(ctx, view) {
-    const g = ctx.createRadialGradient(view.w / 2, view.h / 2, Math.min(view.w, view.h) * 0.35, view.w / 2, view.h / 2, Math.max(view.w, view.h) * 0.75)
-    g.addColorStop(0, 'transparent')
-    g.addColorStop(1, 'rgba(0,0,0,0.55)')
-    ctx.fillStyle = g
-    ctx.fillRect(0, 0, view.w, view.h)
-  }
-
   // ─────────────────────────── HUD 스냅샷 ───────────────────────────
 
   getHud() {
     const p = this.player
     const e = this.enemy
+    const eff = this.itemTotals()
     return {
       time: this.time,
       winner: this.winner,
       wave: this.waveCount,
       champKills: this.champKills,
+      gold: Math.floor(this.gold),
+      items: p.items.slice(),
+      itemTotals: eff,
       player: {
         hp: Math.max(0, Math.round(p.hp)),
         maxHp: Math.round(p.maxHp),
@@ -902,6 +614,9 @@ export class Game {
         kills: this.playerKills,
         cs: this.playerCS,
         towers: this.towersDestroyed,
+        atk: Math.round(p.atk),
+        ap: Math.round((p.ap || 0) * 100),
+        speed: Math.round(p.speed),
       },
       enemy: {
         hp: Math.max(0, Math.round(e.hp)),

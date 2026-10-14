@@ -82,6 +82,37 @@ export const FIRST_WAVE_DELAY = 5
 
 export const XP_REWARD = { minion: 32, tower: 170, champion: 320 }
 
+/** 골드 획득 설정 */
+export const GOLD = {
+  start: 500,
+  perSecond: 1.8,
+  minionMelee: 26,
+  minionRanged: 20,
+  tower: 180,
+  champion: 320,
+}
+
+/** 아이템 상점 (최대 6칸) */
+export const MAX_ITEMS = 6
+
+export const ITEMS = [
+  { id: 'long-sword', name: '롱소드', icon: '⚔️', cost: 350, stats: { atk: 12 }, desc: '공격력 +12' },
+  { id: 'dagger', name: '단검', icon: '🗡️', cost: 300, stats: { atkSpeed: 0.15 }, desc: '공격 속도 +15%' },
+  { id: 'ruby', name: '루비 수정', icon: '❤️', cost: 400, stats: { maxHp: 150 }, desc: '최대 체력 +150' },
+  { id: 'sapphire', name: '사파이어 수정', icon: '💧', cost: 350, stats: { maxMana: 120 }, desc: '최대 마나 +120' },
+  { id: 'boots', name: '장화', icon: '👟', cost: 300, stats: { speed: 30 }, desc: '이동 속도 +30' },
+  { id: 'tome', name: '주문서', icon: '📕', cost: 400, stats: { ap: 0.12 }, desc: '스킬 피해 +12%' },
+  { id: 'pickaxe', name: '곡괭이', icon: '⛏️', cost: 875, stats: { atk: 25 }, desc: '공격력 +25' },
+  { id: 'belt', name: '거인의 허리띠', icon: '🧣', cost: 900, stats: { maxHp: 350 }, desc: '최대 체력 +350' },
+  { id: 'codex', name: '마법사의 고서', icon: '📘', cost: 1100, stats: { ap: 0.22, maxMana: 150 }, desc: '스킬 피해 +22%, 최대 마나 +150' },
+  { id: 'rod', name: '대천사의 지팡이', icon: '🔮', cost: 2900, stats: { ap: 0.4, maxMana: 250 }, desc: '스킬 피해 +40%, 최대 마나 +250' },
+  { id: 'ie', name: '무한의 대검', icon: '🏆', cost: 3400, stats: { atk: 70, atkSpeed: 0.1 }, desc: '공격력 +70, 공격 속도 +10%' },
+  { id: 'ga', name: '수호 천사', icon: '🛡️', cost: 3200, stats: { maxHp: 400, atk: 35 }, desc: '최대 체력 +400, 공격력 +35' },
+]
+
+export const ITEMS_BY_ID = Object.fromEntries(ITEMS.map((it) => [it.id, it]))
+
+
 export const ABILITIES = {
   Q: {
     slot: 'Q', name: '비전 투척', desc: '직선으로 관통하는 마법 투사체',

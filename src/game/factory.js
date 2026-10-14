@@ -33,6 +33,8 @@ export function createChampion(team, pos, isPlayer) {
     level: 1,
     xp: 0,
     xpNext: 160,
+    ap: 0,
+    items: [],
     respawnTimer: 0,
     facing: 0,
     lastHitBy: null,
